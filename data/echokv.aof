@@ -1,0 +1,7 @@
+SET a 1
+DELETE a
+SET a 2
+SET b 3
+DELETE b
+DELETE a
+SET a 4
