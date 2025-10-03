@@ -2,17 +2,21 @@ package server
 
 import (
 	"bufio"
-	"io"
+	"fmt"
 	"log"
 	"net"
+
+	"github.com/vantutran2k1/echokv/internal/protocol"
+	"github.com/vantutran2k1/echokv/internal/store"
 )
 
 type Server struct {
 	listenAddr string
+	store      *store.Store
 }
 
-func NewServer(listenAddr string) *Server {
-	return &Server{listenAddr: listenAddr}
+func NewServer(listenAddr string, store *store.Store) *Server {
+	return &Server{listenAddr: listenAddr, store: store}
 }
 
 func (s *Server) Start() error {
@@ -41,14 +45,19 @@ func (s *Server) handleConnection(conn net.Conn) {
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
 		line := scanner.Bytes()
-		log.Printf("Received from %s: %s", conn.RemoteAddr(), string(line))
-
-		if _, err := conn.Write(append(line, '\n')); err != nil {
-			if err != io.EOF {
-				log.Printf("Error writing to client %s: %v", conn.RemoteAddr(), err)
+		cmd, err := protocol.ParseCommand(line)
+		if err != nil {
+			if _, writeErr := conn.Write([]byte(fmt.Sprintf("(error) %s\n", err))); writeErr != nil {
+				log.Printf("Error writing to connection: %v", writeErr)
 			}
-			break
+			continue
 		}
+
+		if cmd == nil {
+			continue
+		}
+
+		s.executeCommand(conn, cmd)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -56,4 +65,29 @@ func (s *Server) handleConnection(conn net.Conn) {
 	}
 
 	log.Printf("Connection closed for: %s", conn.RemoteAddr())
+}
+
+func (s *Server) executeCommand(conn net.Conn, cmd *protocol.Command) {
+	var response []byte
+	switch cmd.Name {
+	case "GET":
+		value, ok := s.store.Get(cmd.Key)
+		if !ok {
+			response = []byte("(nil)\n")
+		} else {
+			response = []byte(fmt.Sprintf("%s\n", value))
+		}
+	case "SET":
+		s.store.Set(cmd.Key, cmd.Value)
+		response = []byte("OK\n")
+	case "DELETE":
+		s.store.Delete(cmd.Key)
+		response = []byte("OK\n")
+	default:
+		response = []byte(fmt.Sprintf("(error): unknown command '%s'\n", cmd.Name))
+	}
+
+	if _, err := conn.Write(response); err != nil {
+		log.Printf("Error writing to client %s: %v", conn.RemoteAddr(), err)
+	}
 }
