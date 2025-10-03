@@ -139,5 +139,13 @@ func (s *Store) addLog(rawCommand []byte) error {
 		return fmt.Errorf("failed to write newline to AOF: %w", err)
 	}
 
+	if err := s.aofWriter.Flush(); err != nil {
+		return fmt.Errorf("failed to flush AOF writer: %w", err)
+	}
+
+	if err := s.aofFile.Sync(); err != nil {
+		return fmt.Errorf("failed to sync AOF file to disk: %w", err)
+	}
+
 	return nil
 }
