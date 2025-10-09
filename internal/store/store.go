@@ -100,6 +100,14 @@ func (s *Store) Restore() error {
 	return nil
 }
 
+func (s *Store) Get(key string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	value, ok := s.data[key]
+	return value, ok
+}
+
 func (s *Store) Set(key, value string, rawCommand []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -107,14 +115,6 @@ func (s *Store) Set(key, value string, rawCommand []byte) error {
 	s.data[key] = value
 
 	return s.addLog(rawCommand)
-}
-
-func (s *Store) Get(key string) (string, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	value, ok := s.data[key]
-	return value, ok
 }
 
 func (s *Store) Delete(key string, rawCommand []byte) error {
@@ -128,6 +128,26 @@ func (s *Store) Delete(key string, rawCommand []byte) error {
 	delete(s.data, key)
 
 	return s.addLog(rawCommand)
+}
+
+func (s *Store) ApplySet(key, value string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.set(key, value)
+}
+
+func (s *Store) ApplyDelete(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.delete(key)
+}
+
+func (s *Store) set(key, value string) {
+	s.data[key] = value
+}
+
+func (s *Store) delete(key string) {
+	delete(s.data, key)
 }
 
 func (s *Store) addLog(rawCommand []byte) error {
