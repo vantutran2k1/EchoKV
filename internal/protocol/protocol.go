@@ -45,6 +45,10 @@ func ParseCommand(raw []byte) (*Command, error) {
 		}
 
 		cmd.Key = string(parts[1])
+	case "JOIN":
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("%w for JOIN command", ErrUnknownCommand)
+		}
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownCommand, cmdName)
 	}
