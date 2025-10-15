@@ -4,7 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -35,12 +35,22 @@ type Node struct {
 	logStore      raft.LogStore
 	stableStore   raft.StableStore
 	snapshotStore raft.SnapshotStore
+
+	logger *slog.Logger
 }
 
 func NewNode(cfg *Config, store *store.Store) *Node {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})).With(
+		slog.String("node_id", cfg.NodeID),
+		slog.String("data_dir", cfg.DataDir),
+	)
+
 	return &Node{
 		config: cfg,
 		store:  store,
+		logger: logger,
 	}
 }
 
@@ -61,7 +71,7 @@ func (n *Node) Start() error {
 
 	go n.handleClientConnections()
 
-	log.Printf("node %s: client server listening on %s", n.config.NodeID, n.config.ListenAddr)
+	n.logger.Info("client server listening", slog.String("addr", n.config.ListenAddr))
 
 	return nil
 }
@@ -74,9 +84,9 @@ func (n *Node) Shutdown() {
 	if n.raft != nil {
 		future := n.raft.Shutdown()
 		if err := future.Error(); err != nil {
-			log.Printf("node %s: warning: raft shutdown failed: %v", n.config.NodeID, err)
+			n.logger.Warn("raft shutdown failed", slog.String("error", err.Error()))
 		} else {
-			log.Printf("node %s: raft successfully shut down.", n.config.NodeID)
+			n.logger.Info("raft successfully shut down")
 		}
 	}
 }
@@ -104,7 +114,7 @@ func (n *Node) JoinCluster(nodeID, raftAddr string) error {
 		return fmt.Errorf("cannot process join: not hte leader")
 	}
 
-	log.Printf("node %s: received request to join from %s at %s", n.config.NodeID, nodeID, raftAddr)
+	n.logger.Info("received request to join from %s at %s", nodeID, raftAddr)
 
 	configFuture := n.raft.GetConfiguration()
 	if err := configFuture.Error(); err != nil {
@@ -113,7 +123,7 @@ func (n *Node) JoinCluster(nodeID, raftAddr string) error {
 
 	for _, server := range configFuture.Configuration().Servers {
 		if server.ID == raft.ServerID(nodeID) {
-			log.Printf("node %s: node %s already a member, skipping join", n.config.NodeID, nodeID)
+			n.logger.Info("already a member, skipping join", slog.String("node", nodeID))
 			return nil
 		}
 	}
@@ -128,7 +138,7 @@ func (n *Node) JoinCluster(nodeID, raftAddr string) error {
 		return fmt.Errorf("failed to add voter: %w", err)
 	}
 
-	log.Printf("node %s: successfully added new voter %s at %s", n.config.NodeID, nodeID, raftAddr)
+	n.logger.Info("successfully added new voter %s at %s", nodeID, raftAddr)
 	return nil
 }
 
@@ -148,7 +158,7 @@ func (n *Node) setupRaftStorage() error {
 	}
 	n.snapshotStore = snapshotStore
 
-	log.Printf("node %s: raft storage initialized in %s", n.config.NodeID, boltDBPath)
+	n.logger.Info("raft storage initialized", slog.String("path", boltDBPath))
 
 	return nil
 }
@@ -193,7 +203,7 @@ func (n *Node) setupRaftCore() error {
 
 	if lastIndex == 0 {
 		if n.config.JoinAddr == "" {
-			log.Printf("node %s: bootstrapping new cluster...", n.config.NodeID)
+			n.logger.Info("bootstrapping new cluster...")
 
 			configuration := raft.Configuration{
 				Servers: []raft.Server{
@@ -209,13 +219,13 @@ func (n *Node) setupRaftCore() error {
 				if err != raft.ErrCantBootstrap {
 					return fmt.Errorf("failed to bootstrap cluster: %w", err)
 				}
-				log.Printf("node %s: cluster already bootstrapped by another node", n.config.NodeID)
+				n.logger.Info("cluster already bootstrapped by another node")
 			}
 		} else {
-			log.Printf("node %s: started in join mode", n.config.NodeID)
+			n.logger.Info("started in join mode")
 		}
 	} else {
-		log.Printf("node %s: resuming raft operations from existing state (last index: %d)", n.config.NodeID, lastIndex)
+		n.logger.Info("resuming raft operations from existing state", slog.Int("last index", int(lastIndex)))
 	}
 
 	return nil
@@ -226,10 +236,10 @@ func (n *Node) handleClientConnections() {
 		conn, err := (*n.server).Accept()
 		if err != nil {
 			if opErr, ok := err.(*net.OpError); ok && opErr.Temporary() {
-				log.Printf("node %s: temporary error accepting connection: %v", n.config.NodeID, err)
+				n.logger.Error("temporary error accepting connection", slog.String("error", err.Error()))
 				continue
 			}
-			log.Printf("node %s: listener closed or permanent error: %v", n.config.NodeID, err)
+			n.logger.Error("listener closed or permanent error", slog.String("error", err.Error()))
 			return
 		}
 
@@ -239,7 +249,7 @@ func (n *Node) handleClientConnections() {
 
 func (n *Node) handleConnection(conn net.Conn) {
 	defer conn.Close()
-	log.Printf("node %s: accepted new connection from: %s", n.config.NodeID, conn.RemoteAddr())
+	n.logger.Info("accepted new connection", slog.String("addr", conn.RemoteAddr().String()))
 
 	scanner := bufio.NewScanner(conn)
 	for scanner.Scan() {
@@ -309,6 +319,6 @@ func (n *Node) executeCommand(conn net.Conn, cmd *protocol.Command) {
 	}
 
 	if _, err := conn.Write(response); err != nil {
-		log.Printf("node %s: error writing to client %s: %v", n.config.NodeID, conn.RemoteAddr(), err)
+		n.logger.Error("error writing to client", slog.String("addr", conn.RemoteAddr().String()), slog.String("error", err.Error()))
 	}
 }
