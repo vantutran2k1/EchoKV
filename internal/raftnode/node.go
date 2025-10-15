@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/raft"
@@ -15,6 +16,9 @@ import (
 	"github.com/vantutran2k1/echokv/internal/protocol"
 	"github.com/vantutran2k1/echokv/internal/store"
 )
+
+const MaxJoinAttempts = 3
+const JoinRetryInterval = 5 * time.Second
 
 const RaftApplyTimeout = 500 * time.Millisecond
 
@@ -198,34 +202,95 @@ func (n *Node) setupRaftCore() error {
 
 	lastIndex, err := n.logStore.LastIndex()
 	if err != nil {
-		return fmt.Errorf("failed to read last index from lgo store: %w", err)
+		return fmt.Errorf("failed to read last index from log store: %w", err)
 	}
 
 	if lastIndex == 0 {
 		if n.config.JoinAddr == "" {
 			n.logger.Info("bootstrapping new cluster...")
-
-			configuration := raft.Configuration{
-				Servers: []raft.Server{
-					{
-						ID:      raftCfg.LocalID,
-						Address: transport.LocalAddr(),
-					},
-				},
-			}
-
-			future := n.raft.BootstrapCluster(configuration)
-			if err := future.Error(); err != nil {
-				if err != raft.ErrCantBootstrap {
-					return fmt.Errorf("failed to bootstrap cluster: %w", err)
-				}
-				n.logger.Info("cluster already bootstrapped by another node")
+			if err := n.bootstrapNewCluster(raftCfg, transport); err != nil {
+				return err
 			}
 		} else {
-			n.logger.Info("started in join mode")
+			n.logger.Info("starting active join retry mechanism", slog.String("join_target", n.config.JoinAddr), slog.Int("max_attempts", MaxJoinAttempts))
+			go n.retryJoinCluster()
 		}
 	} else {
 		n.logger.Info("resuming raft operations from existing state", slog.Int("last index", int(lastIndex)))
+	}
+
+	return nil
+}
+
+func (n *Node) retryJoinCluster() {
+	ticker := time.NewTicker(JoinRetryInterval)
+	defer ticker.Stop()
+
+	attempts := 0
+	for range ticker.C {
+		if n.raft.State() != raft.Follower {
+			n.logger.Info("node is no longer unconfigured, stopping join attempts")
+			return
+		}
+
+		attempts++
+		if attempts > MaxJoinAttempts {
+			n.logger.Error("exceeded max join attempts, shutting down automatic join process", slog.Int("attempts", MaxJoinAttempts))
+			return
+		}
+
+		n.logger.Debug("attempting to join cluster", slog.Int("attempt", attempts))
+		n.doJoinCluster()
+	}
+}
+
+func (n *Node) doJoinCluster() {
+	lastIndex, _ := n.logStore.LastIndex()
+	if lastIndex > 0 {
+		return
+	}
+
+	n.logger.Debug("actively attempting to join cluster", slog.String("target_addr", n.config.JoinAddr))
+
+	conn, err := net.Dial("tcp", n.config.JoinAddr)
+	if err != nil {
+		n.logger.Warn("failed to connect to join address", slog.Any("error", err))
+		return
+	}
+	defer conn.Close()
+
+	command := fmt.Sprintf("JOIN %s %s\n", n.config.NodeID, n.config.RaftAddr)
+	if _, err := conn.Write([]byte(command)); err != nil {
+		n.logger.Error("failed to send JOIN command", slog.Any("error", err))
+		return
+	}
+
+	scanner := bufio.NewScanner(conn)
+	if scanner.Scan() {
+		response := scanner.Text()
+		if strings.HasPrefix(strings.ToLower(response), "ok") {
+			n.logger.Info("successfully joined cluster!", slog.String("response", response))
+			return
+		}
+		n.logger.Warn("JOIN command rejected by leader", slog.String("response", response))
+	}
+}
+
+func (n *Node) bootstrapNewCluster(raftCfg *raft.Config, transport *raft.NetworkTransport) error {
+	configuration := raft.Configuration{
+		Servers: []raft.Server{
+			{
+				ID:      raftCfg.LocalID,
+				Address: transport.LocalAddr(),
+			},
+		},
+	}
+	future := n.raft.BootstrapCluster(configuration)
+	if err := future.Error(); err != nil {
+		if err != raft.ErrCantBootstrap {
+			return fmt.Errorf("failed to bootstrap cluster: %w", err)
+		}
+		n.logger.Info("cluster already bootstrapped by another node")
 	}
 
 	return nil
