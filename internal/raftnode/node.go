@@ -362,7 +362,7 @@ func (n *Node) executeCommand(conn net.Conn, cmd *protocol.Command) {
 		if err != nil {
 			response = fmt.Appendf(nil, "-error raft apply failed: %s\n", err)
 		} else {
-			response = []byte("OK\n")
+			response = []byte("ok\n")
 		}
 	case "JOIN":
 		if len(cmd.Args) != 2 {
@@ -377,7 +377,7 @@ func (n *Node) executeCommand(conn net.Conn, cmd *protocol.Command) {
 		if err != nil {
 			response = fmt.Appendf(nil, "-error JOIN failed: %s\n", err)
 		} else {
-			response = []byte("OK\n")
+			response = []byte("ok\n")
 		}
 	default:
 		response = fmt.Appendf(nil, "-error unknown command '%s'\n", cmd.Name)
