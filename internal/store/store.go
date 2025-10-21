@@ -26,6 +26,20 @@ func (s *Store) Close() error {
 	return nil
 }
 
+func (s *Store) GetAllData() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.data
+}
+
+func (s *Store) RestoreData(data map[string]string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.data = data
+}
+
 func (s *Store) Get(key string) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

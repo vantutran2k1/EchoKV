@@ -17,10 +17,12 @@ import (
 	"github.com/vantutran2k1/echokv/internal/store"
 )
 
-const MaxJoinAttempts = 3
-const JoinRetryInterval = 5 * time.Second
-
-const RaftApplyTimeout = 500 * time.Millisecond
+const (
+	MaxJoinAttempts       = 3
+	JoinRetryInterval     = 5 * time.Second
+	RaftApplyTimeout      = 500 * time.Millisecond
+	RaftSnapshotThreshold = 8192
+)
 
 type Config struct {
 	NodeID     string
@@ -135,6 +137,7 @@ func (n *Node) setupRaftCore() error {
 
 	raftCfg := raft.DefaultConfig()
 	raftCfg.LocalID = raft.ServerID(n.config.NodeID)
+	raftCfg.SnapshotThreshold = RaftSnapshotThreshold
 
 	ra, err := raft.NewRaft(
 		raftCfg,

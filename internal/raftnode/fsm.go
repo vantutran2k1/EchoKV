@@ -40,9 +40,34 @@ func (f *fsm) Apply(l *raft.Log) any {
 }
 
 func (f *fsm) Snapshot() (raft.FSMSnapshot, error) {
-	return nil, fmt.Errorf("snapshotting is not yet implemented (Phase 4)")
+	return &fsmSnapshot{store: f.Store}, nil
 }
 
 func (f *fsm) Restore(r io.ReadCloser) error {
-	return fmt.Errorf("restore from snapshot is not yet implemented (Phase 4)")
+	restoredData := make(map[string]string)
+	if err := json.NewDecoder(r).Decode(&restoredData); err != nil {
+		return fmt.Errorf("failed to decode snapshot data: %w", err)
+	}
+
+	f.Store.RestoreData(restoredData)
+
+	return nil
 }
+
+type fsmSnapshot struct {
+	store *store.Store
+}
+
+func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
+	data := s.store.GetAllData()
+
+	err := json.NewEncoder(sink).Encode(data)
+	if err != nil {
+		sink.Cancel()
+		return fmt.Errorf("failed to encode snapshot data: %w", err)
+	}
+
+	return sink.Close()
+}
+
+func (s *fsmSnapshot) Release() {}
