@@ -7,6 +7,14 @@ import (
 	"strings"
 )
 
+const (
+	OP_GET    = "GET"
+	OP_SET    = "SET"
+	OP_DELETE = "DELETE"
+	OP_REMOVE = "REMOVE" // remove a node from the cluster
+	OP_JOIN   = "JOIN"   // add a new node to the cluster
+)
+
 var (
 	ErrUnknownCommand = errors.New("unknown command")
 	ErrWrongArgNum    = errors.New("wrong number of arguments")
@@ -32,22 +40,22 @@ func ParseCommand(raw []byte) (*Command, error) {
 	}
 
 	switch cmdName {
-	case "SET":
+	case OP_SET:
 		if len(parts) != 3 {
-			return nil, fmt.Errorf("%w for SET command", ErrWrongArgNum)
+			return nil, fmt.Errorf("%w for %s command", ErrWrongArgNum, cmdName)
 		}
 
 		cmd.Key = string(parts[1])
 		cmd.Value = string(parts[2])
-	case "GET", "DELETE":
+	case OP_GET, OP_DELETE, OP_REMOVE:
 		if len(parts) != 2 {
 			return nil, fmt.Errorf("%w for %s command", ErrWrongArgNum, cmdName)
 		}
 
 		cmd.Key = string(parts[1])
-	case "JOIN":
+	case OP_JOIN:
 		if len(parts) != 3 {
-			return nil, fmt.Errorf("%w for JOIN command", ErrUnknownCommand)
+			return nil, fmt.Errorf("%w for %s command", ErrUnknownCommand, cmdName)
 		}
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnknownCommand, cmdName)

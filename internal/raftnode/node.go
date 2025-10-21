@@ -95,57 +95,6 @@ func (n *Node) Shutdown() {
 	}
 }
 
-func (n *Node) ApplyCommand(c Command) (any, error) {
-	if n.raft.State() != raft.Leader {
-		return nil, fmt.Errorf("not the leader")
-	}
-
-	b, err := json.Marshal(c)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal command: %w", err)
-	}
-
-	future := n.raft.Apply(b, RaftApplyTimeout)
-	if err := future.Error(); err != nil {
-		return nil, fmt.Errorf("raft apply failed: %w", err)
-	}
-
-	return future.Response(), nil
-}
-
-func (n *Node) JoinCluster(nodeID, raftAddr string) error {
-	if n.raft.State() != raft.Leader {
-		return fmt.Errorf("cannot process join: not hte leader")
-	}
-
-	n.logger.Info("received request to join from %s at %s", nodeID, raftAddr)
-
-	configFuture := n.raft.GetConfiguration()
-	if err := configFuture.Error(); err != nil {
-		return fmt.Errorf("failed to get raft configuration: %w", err)
-	}
-
-	for _, server := range configFuture.Configuration().Servers {
-		if server.ID == raft.ServerID(nodeID) {
-			n.logger.Info("already a member, skipping join", slog.String("node", nodeID))
-			return nil
-		}
-	}
-
-	addFuture := n.raft.AddVoter(
-		raft.ServerID(nodeID),
-		raft.ServerAddress(raftAddr),
-		0,
-		0,
-	)
-	if err := addFuture.Error(); err != nil {
-		return fmt.Errorf("failed to add voter: %w", err)
-	}
-
-	n.logger.Info("successfully added new voter %s at %s", nodeID, raftAddr)
-	return nil
-}
-
 func (n *Node) setupRaftStorage() error {
 	boltDBPath := filepath.Join(n.config.DataDir, "raft.db")
 	boltStore, err := raftboltdb.NewBoltStore(boltDBPath)
@@ -213,67 +162,13 @@ func (n *Node) setupRaftCore() error {
 			}
 		} else {
 			n.logger.Info("starting active join retry mechanism", slog.String("join_target", n.config.JoinAddr), slog.Int("max_attempts", MaxJoinAttempts))
-			go n.retryJoinCluster()
+			go n.retryJoinClusterRequest()
 		}
 	} else {
 		n.logger.Info("resuming raft operations from existing state", slog.Int("last index", int(lastIndex)))
 	}
 
 	return nil
-}
-
-func (n *Node) retryJoinCluster() {
-	ticker := time.NewTicker(JoinRetryInterval)
-	defer ticker.Stop()
-
-	attempts := 0
-	for range ticker.C {
-		if n.raft.State() != raft.Follower {
-			n.logger.Info("node is no longer unconfigured, stopping join attempts")
-			return
-		}
-
-		attempts++
-		if attempts > MaxJoinAttempts {
-			n.logger.Error("exceeded max join attempts, shutting down automatic join process", slog.Int("attempts", MaxJoinAttempts))
-			return
-		}
-
-		n.logger.Debug("attempting to join cluster", slog.Int("attempt", attempts))
-		n.doJoinCluster()
-	}
-}
-
-func (n *Node) doJoinCluster() {
-	lastIndex, _ := n.logStore.LastIndex()
-	if lastIndex > 0 {
-		return
-	}
-
-	n.logger.Debug("actively attempting to join cluster", slog.String("target_addr", n.config.JoinAddr))
-
-	conn, err := net.Dial("tcp", n.config.JoinAddr)
-	if err != nil {
-		n.logger.Warn("failed to connect to join address", slog.Any("error", err))
-		return
-	}
-	defer conn.Close()
-
-	command := fmt.Sprintf("JOIN %s %s\n", n.config.NodeID, n.config.RaftAddr)
-	if _, err := conn.Write([]byte(command)); err != nil {
-		n.logger.Error("failed to send JOIN command", slog.Any("error", err))
-		return
-	}
-
-	scanner := bufio.NewScanner(conn)
-	if scanner.Scan() {
-		response := scanner.Text()
-		if strings.HasPrefix(strings.ToLower(response), "ok") {
-			n.logger.Info("successfully joined cluster!", slog.String("response", response))
-			return
-		}
-		n.logger.Warn("JOIN command rejected by leader", slog.String("response", response))
-	}
 }
 
 func (n *Node) bootstrapNewCluster(raftCfg *raft.Config, transport *raft.NetworkTransport) error {
@@ -337,14 +232,14 @@ func (n *Node) executeCommand(conn net.Conn, cmd *protocol.Command) {
 	var err error
 
 	switch cmd.Name {
-	case "GET":
+	case protocol.OP_GET:
 		value, ok := n.store.Get(cmd.Key)
 		if !ok {
 			response = []byte("(nil)\n")
 		} else {
 			response = fmt.Appendf(nil, "%s\n", value)
 		}
-	case "SET", "DELETE":
+	case protocol.OP_SET, protocol.OP_DELETE:
 		if n.raft.State() != raft.Leader {
 			_, leaderAddr := n.raft.LeaderWithID()
 			if leaderAddr == "" {
@@ -358,13 +253,13 @@ func (n *Node) executeCommand(conn net.Conn, cmd *protocol.Command) {
 
 		raftCmd := Command{Op: cmd.Name, Key: cmd.Key, Value: cmd.Value}
 
-		_, err = n.ApplyCommand(raftCmd)
+		_, err = n.applyCommand(raftCmd)
 		if err != nil {
 			response = fmt.Appendf(nil, "-error raft apply failed: %s\n", err)
 		} else {
 			response = []byte("ok\n")
 		}
-	case "JOIN":
+	case protocol.OP_JOIN:
 		if len(cmd.Args) != 2 {
 			response = []byte("-error wrong number of arguments for JOIN. Usage: JOIN <node-id> <raft-addr>\n")
 			break
@@ -373,12 +268,22 @@ func (n *Node) executeCommand(conn net.Conn, cmd *protocol.Command) {
 		joiningNodeID := string(cmd.Args[0])
 		joiningRaftAddr := string(cmd.Args[1])
 
-		err = n.JoinCluster(joiningNodeID, joiningRaftAddr)
+		err = n.addNodeToCluster(joiningNodeID, joiningRaftAddr)
 		if err != nil {
 			response = fmt.Appendf(nil, "-error JOIN failed: %s\n", err)
 		} else {
 			response = []byte("ok\n")
 		}
+	case protocol.OP_REMOVE:
+		nodeToRemove := string(cmd.Args[0])
+
+		err = n.removeNodeFromCluster(nodeToRemove)
+		if err != nil {
+			response = fmt.Appendf(nil, "-error REMOVE failed: %s\n", err)
+		} else {
+			response = []byte("ok\n")
+		}
+
 	default:
 		response = fmt.Appendf(nil, "-error unknown command '%s'\n", cmd.Name)
 	}
@@ -386,4 +291,144 @@ func (n *Node) executeCommand(conn net.Conn, cmd *protocol.Command) {
 	if _, err := conn.Write(response); err != nil {
 		n.logger.Error("error writing to client", slog.String("addr", conn.RemoteAddr().String()), slog.String("error", err.Error()))
 	}
+}
+
+func (n *Node) applyCommand(c Command) (any, error) {
+	if n.raft.State() != raft.Leader {
+		return nil, fmt.Errorf("not the leader")
+	}
+
+	b, err := json.Marshal(c)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal command: %w", err)
+	}
+
+	future := n.raft.Apply(b, RaftApplyTimeout)
+	if err := future.Error(); err != nil {
+		return nil, fmt.Errorf("raft apply failed: %w", err)
+	}
+
+	return future.Response(), nil
+}
+
+func (n *Node) addNodeToCluster(nodeID, raftAddr string) error {
+	if n.raft.State() != raft.Leader {
+		return fmt.Errorf("cannot process join: not the leader")
+	}
+
+	n.logger.Info("received request to join from %s at %s", nodeID, raftAddr)
+
+	configFuture := n.raft.GetConfiguration()
+	if err := configFuture.Error(); err != nil {
+		return fmt.Errorf("failed to get raft configuration: %w", err)
+	}
+
+	for _, server := range configFuture.Configuration().Servers {
+		if server.ID == raft.ServerID(nodeID) {
+			n.logger.Info("already a member, skipping join", slog.String("node", nodeID))
+			return nil
+		}
+	}
+
+	addFuture := n.raft.AddVoter(
+		raft.ServerID(nodeID),
+		raft.ServerAddress(raftAddr),
+		0,
+		0,
+	)
+	if err := addFuture.Error(); err != nil {
+		return fmt.Errorf("failed to add voter: %w", err)
+	}
+
+	n.logger.Info("successfully added new voter %s at %s", nodeID, raftAddr)
+	return nil
+}
+
+func (n *Node) retryJoinClusterRequest() {
+	ticker := time.NewTicker(JoinRetryInterval)
+	defer ticker.Stop()
+
+	attempts := 0
+	for range ticker.C {
+		if n.raft.State() != raft.Follower {
+			n.logger.Info("node is no longer unconfigured, stopping join attempts")
+			return
+		}
+
+		attempts++
+		if attempts > MaxJoinAttempts {
+			n.logger.Error("exceeded max join attempts, shutting down automatic join process", slog.Int("attempts", MaxJoinAttempts))
+			return
+		}
+
+		n.logger.Debug("attempting to join cluster", slog.Int("attempt", attempts))
+		n.sendJoinClusterRequest()
+	}
+}
+
+func (n *Node) sendJoinClusterRequest() {
+	lastIndex, _ := n.logStore.LastIndex()
+	if lastIndex > 0 {
+		return
+	}
+
+	n.logger.Debug("actively attempting to join cluster", slog.String("target_addr", n.config.JoinAddr))
+
+	conn, err := net.Dial("tcp", n.config.JoinAddr)
+	if err != nil {
+		n.logger.Warn("failed to connect to join address", slog.Any("error", err))
+		return
+	}
+	defer conn.Close()
+
+	command := fmt.Sprintf("JOIN %s %s\n", n.config.NodeID, n.config.RaftAddr)
+	if _, err := conn.Write([]byte(command)); err != nil {
+		n.logger.Error("failed to send JOIN command", slog.Any("error", err))
+		return
+	}
+
+	scanner := bufio.NewScanner(conn)
+	if scanner.Scan() {
+		response := scanner.Text()
+		if strings.HasPrefix(strings.ToLower(response), "ok") {
+			n.logger.Info("successfully joined cluster!", slog.String("response", response))
+			return
+		}
+		n.logger.Warn("JOIN command rejected by leader", slog.String("response", response))
+	}
+}
+
+func (n *Node) removeNodeFromCluster(nodeID string) error {
+	if n.raft.State() != raft.Leader {
+		return fmt.Errorf("cannot process remove: not the leader")
+	}
+
+	n.logger.Info("received request to remove server", slog.String("target_node", nodeID))
+
+	serverID := raft.ServerID(nodeID)
+
+	configFuture := n.raft.GetConfiguration()
+	if err := configFuture.Error(); err != nil {
+		return fmt.Errorf("failed to get raft configuration: %w", err)
+	}
+
+	found := false
+	for _, server := range configFuture.Configuration().Servers {
+		if server.ID == serverID {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("server %s not found in the current cluster configuration", nodeID)
+	}
+
+	removeFuture := n.raft.RemoveServer(serverID, 0, 0)
+	if err := removeFuture.Error(); err != nil {
+		return fmt.Errorf("failed to remove server %s: %w", nodeID, err)
+	}
+
+	n.logger.Info("successfully removed reserver", slog.String("target_node", nodeID))
+	return nil
 }

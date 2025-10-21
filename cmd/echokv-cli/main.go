@@ -2,12 +2,15 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"strings"
+
+	"github.com/vantutran2k1/echokv/internal/protocol"
 )
 
 func main() {
@@ -22,7 +25,7 @@ func main() {
 		log.Fatalf("failed to connect to server: %v", err)
 	}
 	defer conn.Close()
-	log.Printf("connected, enter commands (SET, GET, DELETE, JOIN)")
+	log.Printf("connected, enter commands (%s, %s, %s, %s, %s)", protocol.OP_GET, protocol.OP_SET, protocol.OP_DELETE, protocol.OP_JOIN, protocol.OP_REMOVE)
 
 	reader := bufio.NewReader(os.Stdin)
 	serverScanner := bufio.NewScanner(conn)
@@ -45,7 +48,7 @@ func main() {
 		fmt.Print("> ")
 		input, err := reader.ReadString('\n')
 		if err != nil {
-			if err == os.ErrClosed || err.Error() == "EOF" {
+			if errors.Is(err, os.ErrClosed) || err.Error() == "EOF" {
 				break
 			}
 			log.Printf("error reading input: %v", err)
